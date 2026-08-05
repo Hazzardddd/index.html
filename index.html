@@ -1437,9 +1437,20 @@ function firstInstallmentPeriod(dateISO, card){
   let month = d.getMonth();
   let year = d.getFullYear();
   if(card && card.closingDay){
+    // 1) Descobre em qual ciclo de fechamento a compra cai: se o dia da compra
+    // é depois do fechamento, ela só entra na fatura que fecha no mês seguinte.
     if(d.getDate() > Number(card.closingDay)){
       const next = addMonths(year, month, 1);
       month = next.month; year = next.year;
+    }
+    // 2) A maioria dos bancos nomeia a fatura pelo mês em que ela VENCE (é paga),
+    // não pelo mês em que fecha. Se o vencimento cai num dia menor ou igual ao
+    // dia de fechamento, isso significa que o vencimento é no mês seguinte ao
+    // fechamento (ex: fecha dia 25, vence dia 5 → vence no mês seguinte).
+    // Nesse caso, a fatura "empurra" mais um mês para exibir o nome correto.
+    if(card.dueDay != null && card.dueDay !== '' && Number(card.dueDay) <= Number(card.closingDay)){
+      const dueShift = addMonths(year, month, 1);
+      month = dueShift.month; year = dueShift.year;
     }
   }
   return { year, month };
