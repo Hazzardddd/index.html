@@ -279,6 +279,29 @@ a{ color: inherit; }
   padding: 6px 8px;
 }
 .month-label{ font-weight:600; font-size:14px; min-width:130px; text-align:center; }
+.month-label-btn{
+  background:none; border:none; font-family:inherit; cursor:pointer;
+  border-radius: var(--radius-sm); padding:6px 4px;
+}
+.month-label-btn:hover{ background:#F3F5F7; }
+.month-picker-modal{ max-width:340px; }
+.month-picker-year-nav{
+  display:flex; align-items:center; justify-content:center; gap:18px;
+  margin-bottom:16px;
+}
+.month-picker-year-label{ font-family: var(--font-display); font-size:18px; font-weight:700; min-width:60px; text-align:center; }
+.month-picker-grid{
+  display:grid; grid-template-columns: repeat(3, 1fr); gap:8px;
+  margin-bottom: 4px;
+}
+.month-picker-cell{
+  padding:12px 6px; border:1px solid var(--border); border-radius: var(--radius-sm);
+  background:#fff; font-family:inherit; font-size:13.5px; font-weight:600;
+  color: var(--ink); cursor:pointer; transition: all .12s ease;
+}
+.month-picker-cell:hover{ border-color: var(--accent); background: var(--accent-soft); }
+.month-picker-cell.is-selected{ background: var(--ink); border-color: var(--ink); color:#fff; }
+.month-picker-cell.is-today:not(.is-selected){ border-color: var(--accent); color: var(--accent-dark); }
 .month-label span{ color: var(--muted); font-weight:500; }
 
 /* Stat cards */
@@ -1500,13 +1523,51 @@ function splitInstallments(total, n){
 
 // Calcula em qual mês/ano cai a primeira parcela, considerando fechamento do cartão.
 // Dia de fechamento "efetivo" de um cartão num mês específico: usa o ajuste
-// manual daquele mês, se existir, senão o padrão cadastrado no cartão. Isso
-// nunca altera o padrão dos outros meses — só aquele mês tem uma exceção.
-function getEffectiveClosingDay(card, year, month){
+function daysInMonth(year, month){
+  return new Date(year, month+1, 0).getDate();
+}
+
+// Data de fechamento "efetiva" da fatura de um cartão num mês (ano/mês da FATURA,
+// não necessariamente da data de fechamento em si — a fatura de agosto pode
+// fechar em julho). Usa o ajuste manual daquele mês se existir (uma data
+// completa), senão usa o dia padrão cadastrado no cartão dentro do próprio mês.
+// Aceita também o formato antigo de ajuste (só um número de dia), para não
+// quebrar quem já tinha configurado isso antes desta versão.
+function getEffectiveClosingDate(card, year, month){
   const overrides = Store.getCardClosingOverrides();
   const key = card.id + '_' + ymKey(year, month);
   const override = overrides[key];
-  return (override !== undefined && override !== null) ? Number(override) : Number(card.closingDay);
+  if(override !== undefined && override !== null && override !== ''){
+    if(typeof override === 'string' && override.includes('-')){
+      return parseISODate(override); // formato novo: data completa (pode ser de outro mês)
+    }
+    const day = clamp(Number(override), 1, daysInMonth(year, month));
+    return new Date(year, month, day); // formato antigo: só o número do dia
+  }
+  const day = clamp(Number(card.closingDay) || daysInMonth(year, month), 1, daysInMonth(year, month));
+  return new Date(year, month, day);
+}
+
+// Mantido por compatibilidade com quem só precisa do número do dia (ex: exibir
+// "vence antes/depois do fechamento"). Extrai o dia da data de fechamento efetiva.
+function getEffectiveClosingDay(card, year, month){
+  return getEffectiveClosingDate(card, year, month).getDate();
+}
+
+// Descobre a qual fatura (ano/mês) uma compra pertence, comparando a data da
+// compra com a data de fechamento efetiva de cada fatura candidata — já que a
+// data de fechamento de uma fatura pode estar no mês anterior ao dela.
+function findInvoicePeriodForDate(d, card){
+  let year = d.getFullYear(), month = d.getMonth();
+  for(let i = 0; i < 4; i++){
+    const closing = getEffectiveClosingDate(card, year, month);
+    if(d <= closing){
+      return { year, month };
+    }
+    const next = addMonths(year, month, 1);
+    year = next.year; month = next.month;
+  }
+  return { year, month };
 }
 
 function firstInstallmentPeriod(dateISO, card){
@@ -1514,15 +1575,11 @@ function firstInstallmentPeriod(dateISO, card){
   let month = d.getMonth();
   let year = d.getFullYear();
   if(card && card.closingDay){
-    // 1) Descobre em qual ciclo de fechamento a compra cai: se o dia da compra
-    // é depois do fechamento (considerando um eventual ajuste manual de
-    // fechamento feito só para o mês da compra), ela só entra na fatura que
-    // fecha no mês seguinte.
-    const closingThisMonth = getEffectiveClosingDay(card, year, month);
-    if(d.getDate() > closingThisMonth){
-      const next = addMonths(year, month, 1);
-      month = next.month; year = next.year;
-    }
+    // 1) Descobre em qual fatura a compra cai, considerando que a data de
+    // fechamento de cada fatura pode estar em outro mês (ex: fatura de agosto
+    // fechando em 27 de julho).
+    const cycle = findInvoicePeriodForDate(d, card);
+    month = cycle.month; year = cycle.year;
     // 2) A maioria dos bancos nomeia a fatura pelo mês em que ela VENCE (é paga),
     // não pelo mês em que fecha. Se o vencimento cai num dia menor ou igual ao
     // dia de fechamento (do ciclo já determinado acima), isso significa que o
@@ -2061,7 +2118,7 @@ function monthSelectorHTML(idPrefix){
       <button class="icon-btn" data-action="prev-month" title="Mês anterior">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M15 18l-6-6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </button>
-      <div class="month-label">${MONTH_NAMES[month]} <span>${year}</span></div>
+      <button type="button" class="month-label month-label-btn" data-action="open-month-picker" title="Escolher mês e ano">${MONTH_NAMES[month]} <span>${year}</span></button>
       <button class="icon-btn" data-action="next-month" title="Próximo mês">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M9 18l6-6-6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </button>
@@ -2081,6 +2138,63 @@ function bindMonthSwitch(container){
       UI.selected = r; renderPage(UI.currentPage);
     });
   });
+  container.querySelectorAll('[data-action="open-month-picker"]').forEach(btn=>{
+    btn.addEventListener('click', ()=> openMonthYearPicker());
+  });
+}
+
+// Seletor completo de mês/ano: abre ao clicar no nome do mês em qualquer tela
+// que use monthSelectorHTML, permitindo ir direto pra qualquer período e voltar
+// rapidamente para o mês atual.
+function openMonthYearPicker(){
+  const selected = UI.selected;
+  const today = new Date();
+  let viewYear = selected.year;
+
+  const html = `
+    <div class="modal-form month-picker-modal">
+      <h2>Selecionar mês</h2>
+      <div class="month-picker-year-nav">
+        <button type="button" class="icon-btn" id="mpPrevYear">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M15 18l-6-6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <span id="mpYearLabel" class="month-picker-year-label"></span>
+        <button type="button" class="icon-btn" id="mpNextYear">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M9 18l6-6-6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+      </div>
+      <div class="month-picker-grid" id="mpGrid"></div>
+      <div class="modal-actions">
+        <button type="button" class="btn-ghost" id="mpToday">${icon('repeat')} Voltar para o mês atual</button>
+        <button type="button" class="btn-ghost" data-action="close-modal">Fechar</button>
+      </div>
+    </div>`;
+  openModal(html);
+
+  function renderGrid(){
+    document.getElementById('mpYearLabel').textContent = viewYear;
+    document.getElementById('mpGrid').innerHTML = MONTH_SHORT.map((m,i) => {
+      const isSelected = viewYear === selected.year && i === selected.month;
+      const isToday = viewYear === today.getFullYear() && i === today.getMonth();
+      return `<button type="button" class="month-picker-cell ${isSelected?'is-selected':''} ${isToday?'is-today':''}" data-month="${i}">${m}</button>`;
+    }).join('');
+    document.querySelectorAll('.month-picker-cell').forEach(btn=>{
+      btn.addEventListener('click', ()=>{
+        UI.selected = { year: viewYear, month: Number(btn.dataset.month) };
+        closeModal();
+        renderPage(UI.currentPage);
+      });
+    });
+  }
+
+  document.getElementById('mpPrevYear').addEventListener('click', ()=>{ viewYear--; renderGrid(); });
+  document.getElementById('mpNextYear').addEventListener('click', ()=>{ viewYear++; renderGrid(); });
+  document.getElementById('mpToday').addEventListener('click', ()=>{
+    UI.selected = { year: today.getFullYear(), month: today.getMonth() };
+    closeModal();
+    renderPage(UI.currentPage);
+  });
+  renderGrid();
 }
 
 /* ---------- Dashboard ---------- */
@@ -2561,7 +2675,10 @@ function renderLancamentos(){
         <h1>Lançamentos</h1>
         <p class="subtitle">Todos os seus gastos, à vista e parcelados</p>
       </div>
-      <button class="btn-primary" id="btnNewExpense">${icon('plus')} Novo gasto</button>
+      <div class="header-actions">
+        <button class="btn-ghost" id="btnDuplicateLast">${icon('repeat')} Duplicar último</button>
+        <button class="btn-primary" id="btnNewExpense">${icon('plus')} Novo gasto</button>
+      </div>
     </div>
 
     <div class="panel saldos-panel">
@@ -2592,6 +2709,25 @@ function renderLancamentos(){
   `;
 
   document.getElementById('btnNewExpense').addEventListener('click', ()=> openExpenseModal());
+  document.getElementById('btnDuplicateLast').addEventListener('click', ()=>{
+    const list = [...Store.getExpenses()].sort((a,b)=> (b.createdAt||0)-(a.createdAt||0));
+    if(list.length === 0){
+      toast('Nenhum gasto lançado ainda para duplicar.');
+      return;
+    }
+    const last = list[0];
+    openExpenseModal(null, {
+      description: last.description,
+      value: last.value,
+      date: todayISO(),
+      categoryId: last.categoryId,
+      paymentMethod: last.paymentMethod,
+      cardId: last.cardId,
+      installments: last.installments,
+      responsible: last.responsible,
+      note: last.note
+    });
+  });
   document.getElementById('filterText').addEventListener('input', e=>{ UI.filters.text = e.target.value; renderExpensesList(); });
   document.getElementById('filterCategory').addEventListener('change', e=>{ UI.filters.categoryId = e.target.value; renderExpensesList(); });
   document.getElementById('filterCard').addEventListener('change', e=>{ UI.filters.cardId = e.target.value; renderExpensesList(); });
@@ -2673,11 +2809,14 @@ function paymentMethodLabel(pm){
   return map[pm] || pm || '—';
 }
 
-function openExpenseModal(id){
+function openExpenseModal(id, prefill){
   UI.editingExpenseId = id || null;
   const categories = Store.getCategories();
   const cards = Store.getCards();
   const existing = id ? Store.getExpenses().find(e=>e.id===id) : null;
+  // prefill: usado por "Salvar e adicionar outro" e por "Duplicar último gasto"
+  // pra já vir com os campos mais repetitivos preenchidos, sem ser uma edição de verdade.
+  const base = existing || prefill || null;
 
   if(categories.length === 0){
     toast('Cadastre uma categoria antes de lançar um gasto.');
@@ -2690,57 +2829,58 @@ function openExpenseModal(id){
       <div class="form-grid">
         <label class="span-2">
           <span>Descrição da compra</span>
-          <input type="text" name="description" required maxlength="80" value="${existing?escapeHTML(existing.description):''}" placeholder="Ex: Supermercado Extra">
+          <input type="text" name="description" required maxlength="80" value="${base?escapeHTML(base.description||''):''}" placeholder="Ex: Supermercado Extra" autofocus>
         </label>
         <label>
           <span>Valor total (R$)</span>
-          <input type="text" inputmode="decimal" name="value" required value="${existing?String(existing.value).replace('.', ','):''}" placeholder="0,00">
+          <input type="text" inputmode="decimal" name="value" required value="${(base && base.value)?String(base.value).replace('.', ','):''}" placeholder="0,00">
         </label>
         <label>
           <span>Data da compra</span>
-          <input type="date" name="date" required value="${existing?existing.date:todayISO()}">
+          <input type="date" name="date" required value="${base?base.date:todayISO()}">
         </label>
         <label>
           <span>Categoria</span>
           <select name="categoryId" required>
-            ${categories.map(c=>`<option value="${c.id}" ${existing&&existing.categoryId===c.id?'selected':''}>${escapeHTML(c.name)}</option>`).join('')}
+            ${categories.map(c=>`<option value="${c.id}" ${base&&base.categoryId===c.id?'selected':''}>${escapeHTML(c.name)}</option>`).join('')}
           </select>
         </label>
         <label>
           <span>Forma de pagamento</span>
           <select name="paymentMethod" id="fieldPaymentMethod">
-            <option value="credito" ${existing&&existing.paymentMethod==='credito'?'selected':''}>Cartão de crédito</option>
-            <option value="debito" ${existing&&existing.paymentMethod==='debito'?'selected':''}>Cartão de débito</option>
-            <option value="dinheiro" ${existing&&existing.paymentMethod==='dinheiro'?'selected':''}>Dinheiro</option>
-            <option value="pix" ${existing&&existing.paymentMethod==='pix'?'selected':''}>Pix</option>
-            <option value="transferencia" ${existing&&existing.paymentMethod==='transferencia'?'selected':''}>Transferência</option>
+            <option value="credito" ${base&&base.paymentMethod==='credito'?'selected':''}>Cartão de crédito</option>
+            <option value="debito" ${base&&base.paymentMethod==='debito'?'selected':''}>Cartão de débito</option>
+            <option value="dinheiro" ${base&&base.paymentMethod==='dinheiro'?'selected':''}>Dinheiro</option>
+            <option value="pix" ${base&&base.paymentMethod==='pix'?'selected':''}>Pix</option>
+            <option value="transferencia" ${base&&base.paymentMethod==='transferencia'?'selected':''}>Transferência</option>
           </select>
         </label>
         <label id="fieldCardWrap">
           <span>Cartão de crédito utilizado</span>
           <select name="cardId">
             <option value="">Selecione um cartão</option>
-            ${cards.map(c=>`<option value="${c.id}" ${existing&&existing.cardId===c.id?'selected':''}>${escapeHTML(c.name)} (${escapeHTML(c.bank)})</option>`).join('')}
+            ${cards.map(c=>`<option value="${c.id}" ${base&&base.cardId===c.id?'selected':''}>${escapeHTML(c.name)} (${escapeHTML(c.bank)})</option>`).join('')}
           </select>
         </label>
         <label id="fieldInstallmentsWrap">
           <span>Número de parcelas</span>
-          <input type="number" name="installments" min="1" max="60" value="${existing?existing.installments:1}">
+          <input type="number" name="installments" min="1" max="60" value="${(base && base.installments)?base.installments:1}">
         </label>
         <label>
           <span>Responsável (opcional)</span>
           <select name="responsible">
-            ${userOptionsHTML(existing?existing.responsible:'', 'form')}
+            ${userOptionsHTML(base?base.responsible:'', 'form')}
           </select>
         </label>
         <label class="span-2">
           <span>Observação</span>
-          <textarea name="note" rows="2" maxlength="200" placeholder="Opcional">${existing?escapeHTML(existing.note||''):''}</textarea>
+          <textarea name="note" rows="2" maxlength="200" placeholder="Opcional">${base?escapeHTML(base.note||''):''}</textarea>
         </label>
       </div>
       <div id="installmentPreview" class="installment-preview"></div>
       <div class="modal-actions">
         <button type="button" class="btn-ghost" data-action="close-modal">Cancelar</button>
+        ${!existing ? `<button type="button" class="btn-ghost" id="btnSaveAddAnother">Salvar e adicionar outro</button>` : ''}
         <button type="submit" class="btn-primary">${existing?'Salvar alterações':'Adicionar gasto'}</button>
       </div>
     </form>
@@ -2786,15 +2926,16 @@ function openExpenseModal(id){
   form.cardId.addEventListener('change', updateInstallmentPreview);
   toggleFields();
 
-  form.addEventListener('submit', (ev)=>{
-    ev.preventDefault();
+  // Valida e salva o formulário atual; devolve o payload salvo (ou null se inválido),
+  // sem decidir o que acontece depois — isso fica a cargo de quem chamou.
+  function validateAndSave(){
     const fd = new FormData(form);
     const paymentMethod = fd.get('paymentMethod');
     const isCredit = paymentMethod === 'credito';
     const parsedValue = parseCurrencyBR(fd.get('value'));
     if(isNaN(parsedValue) || parsedValue <= 0){
       toast('Informe um valor válido, ex: 150,50');
-      return;
+      return null;
     }
     const payload = {
       id: existing ? existing.id : uid('exp'),
@@ -2811,7 +2952,7 @@ function openExpenseModal(id){
     };
     if(isCredit && !payload.cardId){
       toast('Selecione o cartão utilizado.');
-      return;
+      return null;
     }
     const list = Store.getExpenses();
     if(existing){
@@ -2821,12 +2962,41 @@ function openExpenseModal(id){
       list.push(payload);
     }
     Store.setExpenses(list);
-    closeModal();
-    toast(existing ? 'Gasto atualizado' : 'Gasto adicionado');
     refreshAllSaldos();
     if(UI.currentPage === 'lancamentos') renderExpensesList();
-    else renderPage(UI.currentPage);
+    return payload;
+  }
+
+  form.addEventListener('submit', (ev)=>{
+    ev.preventDefault();
+    const saved = validateAndSave();
+    if(!saved) return;
+    closeModal();
+    toast(existing ? 'Gasto atualizado' : 'Gasto adicionado');
+    if(UI.currentPage !== 'lancamentos') renderPage(UI.currentPage);
   });
+
+  const btnAnother = document.getElementById('btnSaveAddAnother');
+  if(btnAnother){
+    btnAnother.addEventListener('click', ()=>{
+      const saved = validateAndSave();
+      if(!saved) return;
+      toast('Gasto adicionado — pronto para o próximo');
+      // Reabre o modal já com os campos que costumam se repetir preenchidos
+      // (categoria, forma de pagamento, cartão, data, responsável), só limpando
+      // descrição e valor, pra agilizar vários lançamentos parecidos seguidos.
+      openExpenseModal(null, {
+        description: '', value: '',
+        date: saved.date,
+        categoryId: saved.categoryId,
+        paymentMethod: saved.paymentMethod,
+        cardId: saved.cardId,
+        installments: 1,
+        responsible: saved.responsible,
+        note: ''
+      });
+    });
+  }
 }
 
 /* ---------- Cartões de crédito ---------- */
@@ -2871,8 +3041,12 @@ function renderCartoes(){
     const history = getCardInvoiceTimeline(card.id, 2, 4);
     const statusLabel = { paga:'Paga', parcial:'Parcial', aberto:'Em aberto', prevista:'Prevista', 'sem-gastos':'Sem gastos' };
     const statusClass = { paga:'status-paid', parcial:'status-partial', aberto:'status-open', prevista:'status-future', 'sem-gastos':'status-none' };
-    const effectiveClosing = getEffectiveClosingDay(card, year, month);
-    const closingIsOverridden = effectiveClosing !== Number(card.closingDay);
+    const effectiveClosingDate = getEffectiveClosingDate(card, year, month);
+    const closingIsOverridden = effectiveClosingDate.getDate() !== Number(card.closingDay) ||
+      effectiveClosingDate.getMonth() !== month || effectiveClosingDate.getFullYear() !== year;
+    const closingLabel = closingIsOverridden
+      ? 'Fecha em ' + pad2(effectiveClosingDate.getDate()) + '/' + pad2(effectiveClosingDate.getMonth()+1) + '/' + effectiveClosingDate.getFullYear()
+      : 'Fecha dia ' + effectiveClosingDate.getDate();
 
     return `
       <div class="credit-card-panel">
@@ -2883,8 +3057,8 @@ function renderCartoes(){
           </div>
           <div class="cc-name">${escapeHTML(card.name)}</div>
           <div class="cc-dates">
-            Fecha dia ${effectiveClosing}${closingIsOverridden?' (ajustado em '+MONTH_SHORT[month]+'/'+year+')':''} · Vence dia ${card.dueDay}
-            <button class="cc-adjust-closing" data-action="adjust-closing" data-id="${card.id}" title="Ajustar fechamento só de ${MONTH_NAMES[month]}/${year}">${icon('edit')}</button>
+            ${closingLabel} · Vence dia ${card.dueDay}
+            <button class="cc-adjust-closing" data-action="adjust-closing" data-id="${card.id}" title="Ajustar fechamento só da fatura de ${MONTH_NAMES[month]}/${year}">${icon('edit')}</button>
           </div>
         </div>
         <div class="cc-body">
@@ -3005,17 +3179,18 @@ function openCardClosingOverrideModal(cardId, year, month){
   if(!card) return;
   const overrides = Store.getCardClosingOverrides();
   const key = card.id + '_' + ymKey(year, month);
-  const hasOverride = overrides[key] !== undefined && overrides[key] !== null;
-  const currentValue = hasOverride ? overrides[key] : card.closingDay;
+  const hasOverride = overrides[key] !== undefined && overrides[key] !== null && overrides[key] !== '';
+  const currentDate = getEffectiveClosingDate(card, year, month);
+  const currentISO = currentDate.getFullYear()+'-'+pad2(currentDate.getMonth()+1)+'-'+pad2(currentDate.getDate());
 
   const html = `
     <form id="closingOverrideForm" class="modal-form">
-      <h2>Fechamento de ${escapeHTML(card.name)}</h2>
-      <p class="confirm-sub">${MONTH_NAMES[month]} de ${year} — o padrão cadastrado (dia ${card.closingDay}) continua valendo para os outros meses.</p>
+      <h2>Fechamento da fatura de ${escapeHTML(card.name)}</h2>
+      <p class="confirm-sub">Fatura de ${MONTH_NAMES[month]} de ${year} — a data pode ser de qualquer mês (inclusive o anterior). O padrão cadastrado (dia ${card.closingDay}) continua valendo para as outras faturas.</p>
       <div class="form-grid">
         <label class="span-2">
-          <span>Dia de fechamento neste mês</span>
-          <input type="number" name="closingDay" min="1" max="31" required value="${currentValue}">
+          <span>Data de fechamento desta fatura</span>
+          <input type="date" name="closingDate" required value="${currentISO}">
         </label>
       </div>
       <div class="modal-actions">
@@ -3029,13 +3204,13 @@ function openCardClosingOverrideModal(cardId, year, month){
   form.addEventListener('submit', ev=>{
     ev.preventDefault();
     const fd = new FormData(form);
-    const day = clamp(parseInt(fd.get('closingDay'),10), 1, 31);
-    if(isNaN(day)){ toast('Informe um dia válido.'); return; }
+    const dateStr = fd.get('closingDate');
+    if(!dateStr){ toast('Informe uma data válida.'); return; }
     const ov = Store.getCardClosingOverrides();
-    ov[key] = day;
+    ov[key] = dateStr;
     Store.setCardClosingOverrides(ov);
     closeModal();
-    toast('Fechamento deste mês atualizado');
+    toast('Fechamento desta fatura atualizado');
     renderCartoes();
   });
 
