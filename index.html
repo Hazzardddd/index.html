@@ -499,7 +499,14 @@ a{ color: inherit; }
 }
 .cc-top{ display:flex; align-items:center; justify-content:space-between; font-size:12.5px; opacity:0.8; margin-bottom:22px; }
 .cc-name{ font-family: var(--font-display); font-size:19px; font-weight:600; }
-.cc-dates{ font-size:12px; opacity:0.75; margin-top:6px; }
+.cc-dates{ font-size:12px; opacity:0.75; margin-top:6px; display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+.cc-adjust-closing{
+  background: rgba(255,255,255,0.15); border:none; border-radius:5px;
+  width:20px; height:20px; display:inline-flex; align-items:center; justify-content:center;
+  color:#fff; cursor:pointer; opacity:0.85; flex-shrink:0;
+}
+.cc-adjust-closing:hover{ opacity:1; background: rgba(255,255,255,0.28); }
+.cc-adjust-closing svg{ width:11px; height:11px; }
 .cc-body{ padding: 18px 20px 20px; }
 .cc-row{ display:flex; justify-content:space-between; align-items:baseline; font-size:13px; color: var(--muted); margin-bottom:8px; }
 .cc-row strong{ color: var(--ink); font-size:14.5px; }
@@ -926,6 +933,8 @@ const Store = {
     incomes: STORAGE_PREFIX + 'incomes',
     investments: STORAGE_PREFIX + 'investments',
     cardPayments: STORAGE_PREFIX + 'cardPayments',
+    cardClosingOverrides: STORAGE_PREFIX + 'cardClosingOverrides',
+    investmentRedemptions: STORAGE_PREFIX + 'investmentRedemptions',
     users: STORAGE_PREFIX + 'users',
     usersMigrated: STORAGE_PREFIX + 'usersMigratedV1',
     seeded: STORAGE_PREFIX + 'seeded',
@@ -980,6 +989,10 @@ const Store = {
   setInvestments(v){ return this._set(this.keys.investments, v); },
   getCardPayments(){ return this._get(this.keys.cardPayments, []); },
   setCardPayments(v){ return this._set(this.keys.cardPayments, v); },
+  getCardClosingOverrides(){ return this._get(this.keys.cardClosingOverrides, {}); },
+  setCardClosingOverrides(v){ return this._set(this.keys.cardClosingOverrides, v); },
+  getInvestmentRedemptions(){ return this._get(this.keys.investmentRedemptions, []); },
+  setInvestmentRedemptions(v){ return this._set(this.keys.investmentRedemptions, v); },
   getUsers(){ return this._get(this.keys.users, []); },
   setUsers(v){ return this._set(this.keys.users, v); },
 
@@ -997,6 +1010,8 @@ const Store = {
       incomes: this.getIncomes(),
       investments: this.getInvestments(),
       cardPayments: this.getCardPayments(),
+      cardClosingOverrides: this.getCardClosingOverrides(),
+      investmentRedemptions: this.getInvestmentRedemptions(),
       users: this.getUsers()
     };
   },
@@ -1012,6 +1027,8 @@ const Store = {
     if(Array.isArray(data.incomes)) this.setIncomes(data.incomes);
     if(Array.isArray(data.investments)) this.setInvestments(data.investments);
     if(Array.isArray(data.cardPayments)) this.setCardPayments(data.cardPayments);
+    if(data.cardClosingOverrides && typeof data.cardClosingOverrides === 'object') this.setCardClosingOverrides(data.cardClosingOverrides);
+    if(Array.isArray(data.investmentRedemptions)) this.setInvestmentRedemptions(data.investmentRedemptions);
     if(Array.isArray(data.users)) this.setUsers(data.users);
   }
 };
@@ -1023,7 +1040,8 @@ const Store = {
 const SYNCABLE_STORE_KEYS = new Set([
   Store.keys.categories, Store.keys.cards, Store.keys.expenses, Store.keys.fixed,
   Store.keys.fixedPayments, Store.keys.fixedOverrides, Store.keys.goals, Store.keys.incomes,
-  Store.keys.investments, Store.keys.cardPayments, Store.keys.users
+  Store.keys.investments, Store.keys.cardPayments, Store.keys.cardClosingOverrides,
+  Store.keys.investmentRedemptions, Store.keys.users
 ]);
 
 /* =========================================================================
@@ -1481,23 +1499,37 @@ function splitInstallments(total, n){
 }
 
 // Calcula em qual mês/ano cai a primeira parcela, considerando fechamento do cartão.
+// Dia de fechamento "efetivo" de um cartão num mês específico: usa o ajuste
+// manual daquele mês, se existir, senão o padrão cadastrado no cartão. Isso
+// nunca altera o padrão dos outros meses — só aquele mês tem uma exceção.
+function getEffectiveClosingDay(card, year, month){
+  const overrides = Store.getCardClosingOverrides();
+  const key = card.id + '_' + ymKey(year, month);
+  const override = overrides[key];
+  return (override !== undefined && override !== null) ? Number(override) : Number(card.closingDay);
+}
+
 function firstInstallmentPeriod(dateISO, card){
   const d = parseISODate(dateISO);
   let month = d.getMonth();
   let year = d.getFullYear();
   if(card && card.closingDay){
     // 1) Descobre em qual ciclo de fechamento a compra cai: se o dia da compra
-    // é depois do fechamento, ela só entra na fatura que fecha no mês seguinte.
-    if(d.getDate() > Number(card.closingDay)){
+    // é depois do fechamento (considerando um eventual ajuste manual de
+    // fechamento feito só para o mês da compra), ela só entra na fatura que
+    // fecha no mês seguinte.
+    const closingThisMonth = getEffectiveClosingDay(card, year, month);
+    if(d.getDate() > closingThisMonth){
       const next = addMonths(year, month, 1);
       month = next.month; year = next.year;
     }
     // 2) A maioria dos bancos nomeia a fatura pelo mês em que ela VENCE (é paga),
     // não pelo mês em que fecha. Se o vencimento cai num dia menor ou igual ao
-    // dia de fechamento, isso significa que o vencimento é no mês seguinte ao
-    // fechamento (ex: fecha dia 25, vence dia 5 → vence no mês seguinte).
-    // Nesse caso, a fatura "empurra" mais um mês para exibir o nome correto.
-    if(card.dueDay != null && card.dueDay !== '' && Number(card.dueDay) <= Number(card.closingDay)){
+    // dia de fechamento (do ciclo já determinado acima), isso significa que o
+    // vencimento é no mês seguinte ao fechamento (ex: fecha dia 25, vence dia 5
+    // → vence no mês seguinte). Nesse caso, a fatura "empurra" mais um mês.
+    const closingOfCycle = getEffectiveClosingDay(card, year, month);
+    if(card.dueDay != null && card.dueDay !== '' && Number(card.dueDay) <= closingOfCycle){
       const dueShift = addMonths(year, month, 1);
       month = dueShift.month; year = dueShift.year;
     }
@@ -1794,6 +1826,9 @@ function getSaldoPix(){
   Store.getCardPayments().forEach(p => {
     if(p.source === 'pix') total -= Number(p.value) || 0;
   });
+  Store.getInvestmentRedemptions().forEach(r => {
+    if(r.destination === 'pix') total += Number(r.value) || 0;
+  });
   return total;
 }
 
@@ -1811,6 +1846,9 @@ function getSaldoDinheiro(){
   });
   Store.getCardPayments().forEach(p => {
     if(p.source === 'dinheiro') total -= Number(p.value) || 0;
+  });
+  Store.getInvestmentRedemptions().forEach(r => {
+    if(r.destination === 'dinheiro') total += Number(r.value) || 0;
   });
   return total;
 }
@@ -1906,23 +1944,62 @@ function getInvestmentsUpTo(year, month){
   return Store.getInvestments().filter(inv => parseISODate(inv.date) <= lastDay);
 }
 
+// Quantos meses completos se passaram entre a data do investimento e o mês de referência.
+function getInvestmentMonthsElapsed(investmentDate, asOfYear, asOfMonth){
+  const d = parseISODate(investmentDate);
+  const months = (asOfYear - d.getFullYear()) * 12 + (asOfMonth - d.getMonth());
+  return Math.max(0, months);
+}
+
+// Saldo bruto de um investimento (aporte original + juros compostos pela taxa mensal
+// cadastrada), ANTES de descontar qualquer resgate já feito.
+function getInvestmentGrossBalance(investment, asOfYear, asOfMonth){
+  const months = getInvestmentMonthsElapsed(investment.date, asOfYear, asOfMonth);
+  const rate = (Number(investment.monthlyRate) || 0) / 100;
+  const principal = Number(investment.value) || 0;
+  return principal * Math.pow(1 + rate, months);
+}
+
+// Soma de tudo que já foi resgatado desse investimento até um mês de referência.
+function getInvestmentRedeemedTotal(investmentId, uptoYear, uptoMonth){
+  const lastDay = new Date(uptoYear, uptoMonth+1, 0);
+  return Store.getInvestmentRedemptions()
+    .filter(r => r.investmentId === investmentId && parseISODate(r.date) <= lastDay)
+    .reduce((s,r)=>s+(Number(r.value)||0), 0);
+}
+
+// Saldo atual de um investimento = principal + rendimento acumulado - resgates já feitos.
+function getInvestmentCurrentBalance(investment, asOfYear, asOfMonth){
+  const gross = getInvestmentGrossBalance(investment, asOfYear, asOfMonth);
+  const redeemed = getInvestmentRedeemedTotal(investment.id, asOfYear, asOfMonth);
+  return Math.max(0, gross - redeemed);
+}
+
+// Só o rendimento (juros) acumulado até agora, sem contar o aporte original.
+function getInvestmentYieldAccrued(investment, asOfYear, asOfMonth){
+  const gross = getInvestmentGrossBalance(investment, asOfYear, asOfMonth);
+  return gross - (Number(investment.value) || 0);
+}
+
 function getInvestmentTotalsUpTo(year, month){
   const records = getInvestmentsUpTo(year, month);
-  let invested = 0, saved = 0;
+  let invested = 0, saved = 0, totalYield = 0;
   const byResponsible = {}; Store.getUsers().forEach(u=>byResponsible[u.id]=0); byResponsible[''] = 0;
   records.forEach(r => {
-    const v = Number(r.value||0);
-    if(SAVED_INVESTMENT_TYPES.includes(r.type)) saved += v; else invested += v;
+    const balance = getInvestmentCurrentBalance(r, year, month);
+    totalYield += getInvestmentYieldAccrued(r, year, month);
+    if(SAVED_INVESTMENT_TYPES.includes(r.type)) saved += balance; else invested += balance;
     const key = byResponsible.hasOwnProperty(r.responsible) ? r.responsible : '';
-    byResponsible[key] = (byResponsible[key]||0) + v;
+    byResponsible[key] = (byResponsible[key]||0) + balance;
   });
-  return { invested, saved, total: invested+saved, byResponsible };
+  return { invested, saved, total: invested+saved, byResponsible, totalYield };
 }
 
 function getInvestmentTotalsByType(year, month){
   const totals = {};
   getInvestmentsUpTo(year, month).forEach(r => {
-    totals[r.type] = (totals[r.type]||0) + Number(r.value||0);
+    const balance = getInvestmentCurrentBalance(r, year, month);
+    totals[r.type] = (totals[r.type]||0) + balance;
   });
   return totals;
 }
@@ -2794,6 +2871,8 @@ function renderCartoes(){
     const history = getCardInvoiceTimeline(card.id, 2, 4);
     const statusLabel = { paga:'Paga', parcial:'Parcial', aberto:'Em aberto', prevista:'Prevista', 'sem-gastos':'Sem gastos' };
     const statusClass = { paga:'status-paid', parcial:'status-partial', aberto:'status-open', prevista:'status-future', 'sem-gastos':'status-none' };
+    const effectiveClosing = getEffectiveClosingDay(card, year, month);
+    const closingIsOverridden = effectiveClosing !== Number(card.closingDay);
 
     return `
       <div class="credit-card-panel">
@@ -2803,7 +2882,10 @@ function renderCartoes(){
             ${icon('card')}
           </div>
           <div class="cc-name">${escapeHTML(card.name)}</div>
-          <div class="cc-dates">Fecha dia ${card.closingDay} · Vence dia ${card.dueDay}</div>
+          <div class="cc-dates">
+            Fecha dia ${effectiveClosing}${closingIsOverridden?' (ajustado em '+MONTH_SHORT[month]+'/'+year+')':''} · Vence dia ${card.dueDay}
+            <button class="cc-adjust-closing" data-action="adjust-closing" data-id="${card.id}" title="Ajustar fechamento só de ${MONTH_NAMES[month]}/${year}">${icon('edit')}</button>
+          </div>
         </div>
         <div class="cc-body">
           <button class="cc-row cc-row-clickable" data-action="view-invoice" data-id="${card.id}" data-year="${year}" data-month="${month}"><span>Fatura atual (${MONTH_SHORT[month]}/${year})</span><strong>${brl(invoiceTotal)} ${icon('chevronRight')}</strong></button>
@@ -2836,6 +2918,11 @@ function renderCartoes(){
     btn.addEventListener('click', e=>{
       const el = e.currentTarget;
       openInvoiceDetailModal(el.dataset.id, Number(el.dataset.year), Number(el.dataset.month));
+    });
+  });
+  container.querySelectorAll('[data-action="adjust-closing"]').forEach(btn=>{
+    btn.addEventListener('click', e=>{
+      openCardClosingOverrideModal(e.currentTarget.dataset.id, year, month);
     });
   });
   container.querySelectorAll('[data-action="edit-card"]').forEach(btn=>{
@@ -2910,6 +2997,61 @@ function openCardModal(id){
 // Reduz o saldo correspondente, abate o valor em aberto da fatura e restaura o limite do cartão.
 // Mostra, item a item, tudo que compõe a fatura de um cartão num mês —
 // data, descrição, valor e parcela (quando houver) — para conferência antes do pagamento.
+// Ajusta o dia de fechamento de UM cartão só no mês selecionado (ex: fevereiro
+// com 28 dias, ou o banco excepcionalmente mudou a virada naquele mês) — nunca
+// altera o padrão cadastrado no cartão nem os outros meses.
+function openCardClosingOverrideModal(cardId, year, month){
+  const card = getCardById(cardId);
+  if(!card) return;
+  const overrides = Store.getCardClosingOverrides();
+  const key = card.id + '_' + ymKey(year, month);
+  const hasOverride = overrides[key] !== undefined && overrides[key] !== null;
+  const currentValue = hasOverride ? overrides[key] : card.closingDay;
+
+  const html = `
+    <form id="closingOverrideForm" class="modal-form">
+      <h2>Fechamento de ${escapeHTML(card.name)}</h2>
+      <p class="confirm-sub">${MONTH_NAMES[month]} de ${year} — o padrão cadastrado (dia ${card.closingDay}) continua valendo para os outros meses.</p>
+      <div class="form-grid">
+        <label class="span-2">
+          <span>Dia de fechamento neste mês</span>
+          <input type="number" name="closingDay" min="1" max="31" required value="${currentValue}">
+        </label>
+      </div>
+      <div class="modal-actions">
+        ${hasOverride ? `<button type="button" class="btn-ghost" id="btnRestoreDefaultClosing">Restaurar padrão</button>` : `<span></span>`}
+        <button type="submit" class="btn-primary">Salvar</button>
+      </div>
+    </form>`;
+  openModal(html);
+  const form = document.getElementById('closingOverrideForm');
+
+  form.addEventListener('submit', ev=>{
+    ev.preventDefault();
+    const fd = new FormData(form);
+    const day = clamp(parseInt(fd.get('closingDay'),10), 1, 31);
+    if(isNaN(day)){ toast('Informe um dia válido.'); return; }
+    const ov = Store.getCardClosingOverrides();
+    ov[key] = day;
+    Store.setCardClosingOverrides(ov);
+    closeModal();
+    toast('Fechamento deste mês atualizado');
+    renderCartoes();
+  });
+
+  const btnRestore = document.getElementById('btnRestoreDefaultClosing');
+  if(btnRestore){
+    btnRestore.addEventListener('click', ()=>{
+      const ov = Store.getCardClosingOverrides();
+      delete ov[key];
+      Store.setCardClosingOverrides(ov);
+      closeModal();
+      toast('Fechamento padrão restaurado');
+      renderCartoes();
+    });
+  }
+}
+
 function openInvoiceDetailModal(cardId, year, month){
   const card = getCardById(cardId);
   if(!card) return;
@@ -3107,10 +3249,15 @@ function renderFixos(){
   root.innerHTML = `
     <div class="page-header">
       <div><h1>Gastos fixos</h1><p class="subtitle">Contas recorrentes lançadas automaticamente todo mês</p></div>
-      <button class="btn-primary" id="btnNewFixed">${icon('plus')} Novo gasto fixo</button>
+      <div class="header-actions">
+        ${monthSelectorHTML('fixos')}
+        <button class="btn-primary" id="btnNewFixed">${icon('plus')} Novo gasto fixo</button>
+      </div>
     </div>
+    <p class="config-desc">Ajustar o valor de um mês específico (ex: água ou luz variaram) não muda o valor padrão dos outros meses. Para mudar o valor padrão definitivamente, use "Alterar valor padrão".</p>
     <div class="panel"><div id="fixedList"></div></div>
   `;
+  bindMonthSwitch(root);
   document.getElementById('btnNewFixed').addEventListener('click', ()=>openFixedModal());
   renderFixedList();
 }
@@ -3133,15 +3280,16 @@ function renderFixedList(){
         <div class="col-tag" style="background:${cat?cat.color:'#868E96'}22;color:${cat?cat.color:'#868E96'}">${cat?escapeHTML(cat.name):'Sem categoria'}</div>
         <div class="col-main">
           <span class="row-title">${escapeHTML(e.description)}</span>
-          <span class="row-sub">Dia ${e.payDay} · ${frequencyLabel(e.frequency)}${e.paid && methodLabel?' · Pago via '+methodLabel:''}</span>
+          <span class="row-sub">Dia ${e.payDay} · ${frequencyLabel(e.frequency)}${e.paid && methodLabel?' · Pago via '+methodLabel:''}${e.isOverridden?' · valor ajustado neste mês':''}</span>
         </div>
-        <button class="col-value fixed-value-btn" data-action="edit-value" title="Ajustar valor deste mês">
+        <button class="col-value fixed-value-btn" data-action="edit-value" title="Ajustar valor só de ${MONTH_NAMES[month]}/${year}">
           ${brl(e.value)}${e.isOverridden?'<span class="badge">ajustado</span>':''}
         </button>
         <label class="paid-toggle"><input type="checkbox" data-action="toggle-paid" ${e.paid?'checked':''}><span>${e.paid?'Pago':'Marcar pago'}</span></label>
         <div class="col-actions">
-          <button class="icon-btn" data-action="edit-fixed">${icon('edit')}</button>
-          <button class="icon-btn danger" data-action="delete-fixed">${icon('trash')}</button>
+          <button class="icon-btn" data-action="edit-default-value" title="Alterar valor padrão (afeta os próximos meses)">${icon('repeat')}</button>
+          <button class="icon-btn" data-action="edit-fixed" title="Editar nome/categoria/dia">${icon('edit')}</button>
+          <button class="icon-btn danger" data-action="delete-fixed" title="Excluir">${icon('trash')}</button>
         </div>
       </div>`;
   }).join('') + '</div>';
@@ -3149,6 +3297,10 @@ function renderFixedList(){
   container.querySelectorAll('[data-action="edit-value"]').forEach(b=>b.addEventListener('click', e=>{
     const id = e.target.closest('.table-row').dataset.id;
     openFixedValueModal(id, year, month);
+  }));
+  container.querySelectorAll('[data-action="edit-default-value"]').forEach(b=>b.addEventListener('click', e=>{
+    const id = e.target.closest('.table-row').dataset.id;
+    openFixedDefaultValueModal(id);
   }));
   container.querySelectorAll('[data-action="edit-fixed"]').forEach(b=>b.addEventListener('click', e=>openFixedModal(e.target.closest('.table-row').dataset.id)));
   container.querySelectorAll('[data-action="delete-fixed"]').forEach(b=>b.addEventListener('click', e=>{
@@ -3325,10 +3477,11 @@ function openFixedModal(id){
       <div class="form-grid">
         <label class="span-2"><span>Nome</span><input type="text" name="name" required maxlength="40" value="${existing?escapeHTML(existing.name):''}" placeholder="Ex: Internet"></label>
         <label><span>Categoria</span><select name="categoryId" required>${categories.map(c=>`<option value="${c.id}" ${existing&&existing.categoryId===c.id?'selected':''}>${escapeHTML(c.name)}</option>`).join('')}</select></label>
-        <label><span>Valor esperado (R$)</span><input type="text" inputmode="decimal" name="expectedValue" required value="${existing?String(existing.expectedValue).replace('.', ','):''}" placeholder="0,00"></label>
+        ${existing ? '' : `<label><span>Valor esperado (R$)</span><input type="text" inputmode="decimal" name="expectedValue" required placeholder="0,00"></label>`}
         <label><span>Dia de pagamento</span><input type="number" name="payDay" min="1" max="31" required value="${existing?existing.payDay:''}"></label>
         <label><span>Frequência</span><select name="frequency"><option value="mensal" ${existing&&existing.frequency==='mensal'?'selected':''}>Mensal</option><option value="anual" ${existing&&existing.frequency==='anual'?'selected':''}>Anual</option></select></label>
       </div>
+      ${existing ? `<p class="config-desc">Para mudar o valor, use os botões de valor na lista (ajustar um mês ou alterar o padrão).</p>` : ''}
       <div class="modal-actions">
         <button type="button" class="btn-ghost" data-action="close-modal">Cancelar</button>
         <button type="submit" class="btn-primary">${existing?'Salvar':'Adicionar'}</button>
@@ -3338,16 +3491,20 @@ function openFixedModal(id){
   document.getElementById('fixedForm').addEventListener('submit', ev=>{
     ev.preventDefault();
     const fd = new FormData(ev.target);
-    const parsedExpected = parseCurrencyBR(fd.get('expectedValue'));
-    if(isNaN(parsedExpected) || parsedExpected <= 0){
-      toast('Informe um valor válido, ex: 120,00');
-      return;
+    let expectedValue = existing ? existing.expectedValue : 0;
+    if(!existing){
+      const parsedExpected = parseCurrencyBR(fd.get('expectedValue'));
+      if(isNaN(parsedExpected) || parsedExpected <= 0){
+        toast('Informe um valor válido, ex: 120,00');
+        return;
+      }
+      expectedValue = parsedExpected;
     }
     const payload = {
       id: existing?existing.id:uid('fixed'),
       name: fd.get('name').trim(),
       categoryId: fd.get('categoryId'),
-      expectedValue: parsedExpected,
+      expectedValue: expectedValue,
       payDay: clamp(parseInt(fd.get('payDay'),10),1,31),
       frequency: fd.get('frequency')
     };
@@ -3357,6 +3514,46 @@ function openFixedModal(id){
     Store.setFixed(list);
     closeModal();
     toast(existing?'Gasto fixo atualizado':'Gasto fixo adicionado');
+    renderFixedList();
+  });
+}
+
+// Ação explicitamente separada da edição de mês único: muda o valor PADRÃO do
+// gasto fixo, usado em todos os meses que não têm um ajuste próprio.
+function openFixedDefaultValueModal(fixedId){
+  const fixed = Store.getFixed().find(f=>f.id===fixedId);
+  if(!fixed) return;
+  const html = `
+    <form id="fixedDefaultValueForm" class="modal-form">
+      <h2>Alterar valor padrão</h2>
+      <p class="confirm-sub">${escapeHTML(fixed.name)} — isso muda o valor usado em <strong>todos os meses futuros</strong> que não tiverem um ajuste individual próprio. Meses já ajustados individualmente não são afetados.</p>
+      <div class="form-grid">
+        <label class="span-2">
+          <span>Novo valor padrão (R$)</span>
+          <input type="text" inputmode="decimal" name="value" required value="${String(fixed.expectedValue).replace('.', ',')}" placeholder="0,00">
+        </label>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn-ghost" data-action="close-modal">Cancelar</button>
+        <button type="submit" class="btn-primary">Alterar valor padrão</button>
+      </div>
+    </form>`;
+  openModal(html);
+  document.getElementById('fixedDefaultValueForm').addEventListener('submit', ev=>{
+    ev.preventDefault();
+    const fd = new FormData(ev.target);
+    const parsed = parseCurrencyBR(fd.get('value'));
+    if(isNaN(parsed) || parsed <= 0){
+      toast('Informe um valor válido, ex: 120,00');
+      return;
+    }
+    const list = Store.getFixed();
+    const idx = list.findIndex(x=>x.id===fixedId);
+    if(idx === -1) return;
+    list[idx] = { ...list[idx], expectedValue: parsed };
+    Store.setFixed(list);
+    closeModal();
+    toast('Valor padrão alterado para os próximos meses');
     renderFixedList();
   });
 }
@@ -3633,6 +3830,13 @@ function renderInvestimentos(){
           <span class="stat-sub">${topOwner?brl(topOwnerVal):''}</span>
         </div>
       </div>
+      <div class="stat-card">
+        <div class="stat-icon" style="background:#E6FCF5; color:var(--accent-dark)">${icon('trendUp')}</div>
+        <div class="stat-info">
+          <span class="stat-label">Rendimento acumulado</span>
+          <span class="stat-value">${brl(totals.totalYield)}</span>
+        </div>
+      </div>
     </div>
 
     ${Store.getUsers().length > 0 ? `
@@ -3770,33 +3974,131 @@ function renderInvestmentsList(){
   container.innerHTML = `<div class="table-list">` + list.map(i => {
     const idx = INVESTMENT_TYPES.indexOf(i.type);
     const color = CHART_PALETTE[idx % CHART_PALETTE.length];
+    const { year, month } = UI.selected;
+    const balance = getInvestmentCurrentBalance(i, year, month);
+    const yieldAmount = getInvestmentYieldAccrued(i, year, month);
+    const redeemed = getInvestmentRedeemedTotal(i.id, year, month);
+    const rateLabel = Number(i.monthlyRate) > 0 ? `${String(i.monthlyRate).replace('.', ',')}% a.m.` : '';
     return `
     <div class="table-row" data-id="${i.id}">
       <div class="col-tag" style="background:${color}22; color:${color}">${escapeHTML(i.type)}</div>
       <div class="col-main">
-        <span class="row-title">${escapeHTML(i.description)}</span>
-        <span class="row-sub">${formatDateBR(i.date)} · ${escapeHTML(getUserName(i.responsible))}${i.note?' · '+escapeHTML(i.note):''}</span>
+        <span class="row-title">${escapeHTML(i.description)}${rateLabel?' <span class="badge">'+rateLabel+'</span>':''}</span>
+        <span class="row-sub">Aportado ${formatDateBR(i.date)}${' · '+brl(i.value)+' + '+brl(yieldAmount)+' rendimento'}${redeemed>0?' · '+brl(redeemed)+' já resgatado':''} · ${escapeHTML(getUserName(i.responsible))}${i.note?' · '+escapeHTML(i.note):''}</span>
       </div>
-      <div class="col-value income-value">${brl(i.value)}</div>
+      <div class="col-value income-value">${brl(balance)}</div>
       <div class="col-actions">
+        <button class="icon-btn" data-action="redeem-investment" title="Resgatar" ${balance<=0?'disabled':''}>${icon('wallet')}</button>
         <button class="icon-btn" data-action="edit-investment" title="Editar">${icon('edit')}</button>
         <button class="icon-btn danger" data-action="delete-investment" title="Excluir">${icon('trash')}</button>
       </div>
     </div>`;
   }).join('') + `</div>`;
 
+  container.querySelectorAll('[data-action="redeem-investment"]').forEach(btn=>{
+    btn.addEventListener('click', e=> openInvestmentRedeemModal(e.target.closest('.table-row').dataset.id));
+  });
   container.querySelectorAll('[data-action="edit-investment"]').forEach(btn=>{
     btn.addEventListener('click', e=> openInvestmentModal(e.target.closest('.table-row').dataset.id));
   });
   container.querySelectorAll('[data-action="delete-investment"]').forEach(btn=>{
     btn.addEventListener('click', e=>{
       const id = e.target.closest('.table-row').dataset.id;
-      confirmAction('Excluir investimento?', 'Essa ação não pode ser desfeita.', ()=>{
+      confirmAction('Excluir investimento?', 'Essa ação não pode ser desfeita. O histórico de resgates desse investimento também será removido.', ()=>{
         Store.setInvestments(Store.getInvestments().filter(x=>x.id!==id));
+        Store.setInvestmentRedemptions(Store.getInvestmentRedemptions().filter(r=>r.investmentId!==id));
         renderInvestmentsList();
+        refreshAllSaldos();
         toast('Investimento excluído');
       });
     });
+  });
+}
+
+// Resgata total ou parcialmente um investimento: reduz o saldo do investimento
+// (via registro de resgate, mantendo o histórico) e devolve o valor para o
+// saldo da conta escolhida (PIX ou Dinheiro).
+function openInvestmentRedeemModal(investmentId){
+  const investment = Store.getInvestments().find(i=>i.id===investmentId);
+  if(!investment) return;
+  const { year, month } = UI.selected;
+  const balance = getInvestmentCurrentBalance(investment, year, month);
+  if(balance <= 0){
+    toast('Este investimento não tem saldo disponível para resgate.');
+    return;
+  }
+
+  const html = `
+    <form id="redeemForm" class="modal-form">
+      <h2>Resgatar — ${escapeHTML(investment.description)}</h2>
+      <p class="confirm-sub">Saldo disponível: <strong>${brl(balance)}</strong></p>
+      <div class="form-grid">
+        <label class="span-2">
+          <span>Tipo de resgate</span>
+          <select name="type" id="redeemType" required>
+            <option value="total">Resgate total (${brl(balance)})</option>
+            <option value="parcial">Resgate parcial</option>
+          </select>
+        </label>
+        <label class="span-2" id="redeemValueWrap" style="display:none;">
+          <span>Valor a resgatar (R$)</span>
+          <input type="text" inputmode="decimal" name="value" placeholder="0,00">
+        </label>
+        <label class="span-2">
+          <span>Devolver o valor para</span>
+          <select name="destination" required>
+            <option value="pix">PIX / Conta (saldo: ${brl(getSaldoPix())})</option>
+            <option value="dinheiro">Dinheiro em espécie (saldo: ${brl(getSaldoDinheiro())})</option>
+          </select>
+        </label>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn-ghost" data-action="close-modal">Cancelar</button>
+        <button type="submit" class="btn-primary">Confirmar resgate</button>
+      </div>
+    </form>`;
+  openModal(html);
+  const form = document.getElementById('redeemForm');
+  const typeSel = document.getElementById('redeemType');
+  const valueWrap = document.getElementById('redeemValueWrap');
+  function toggleValueField(){ valueWrap.style.display = typeSel.value === 'parcial' ? '' : 'none'; }
+  typeSel.addEventListener('change', toggleValueField);
+  toggleValueField();
+
+  form.addEventListener('submit', ev=>{
+    ev.preventDefault();
+    const fd = new FormData(form);
+    const type = fd.get('type');
+    let value;
+    if(type === 'total'){
+      value = balance;
+    } else {
+      value = parseCurrencyBR(fd.get('value'));
+      if(isNaN(value) || value <= 0){
+        toast('Informe um valor válido, ex: 200,00');
+        return;
+      }
+      if(value > balance){
+        toast('O valor não pode ser maior que o saldo disponível (' + brl(balance) + ').');
+        return;
+      }
+    }
+    const destination = fd.get('destination');
+    const redemptions = Store.getInvestmentRedemptions();
+    redemptions.push({
+      id: uid('redeem'),
+      investmentId,
+      date: todayISO(),
+      value,
+      destination,
+      note: '',
+      createdAt: Date.now()
+    });
+    Store.setInvestmentRedemptions(redemptions);
+    closeModal();
+    toast('Resgate registrado');
+    renderInvestmentsList();
+    refreshAllSaldos();
   });
 }
 
@@ -3826,6 +4128,10 @@ function openInvestmentModal(id){
           </select>
         </label>
         <label>
+          <span>Taxa de rendimento mensal (%)</span>
+          <input type="text" inputmode="decimal" name="monthlyRate" value="${existing&&existing.monthlyRate?String(existing.monthlyRate).replace('.', ','):''}" placeholder="Ex: 0,85 (opcional)">
+        </label>
+        <label>
           <span>Responsável</span>
           <select name="responsible">
             ${userOptionsHTML(existing?existing.responsible:'', 'form')}
@@ -3851,12 +4157,23 @@ function openInvestmentModal(id){
       toast('Informe um valor válido, ex: 500,00');
       return;
     }
+    const rateRaw = (fd.get('monthlyRate')||'').trim();
+    let monthlyRate = 0;
+    if(rateRaw){
+      const parsedRate = parseCurrencyBR(rateRaw);
+      if(isNaN(parsedRate) || parsedRate < 0){
+        toast('Informe uma taxa válida, ex: 0,85');
+        return;
+      }
+      monthlyRate = parsedRate;
+    }
     const payload = {
       id: existing?existing.id:uid('inv'),
       description: fd.get('description').trim(),
       value: parsedValue,
       date: fd.get('date'),
       type: fd.get('type'),
+      monthlyRate,
       responsible: fd.get('responsible'),
       note: (fd.get('note')||'').trim(),
       createdAt: existing?existing.createdAt:Date.now()
